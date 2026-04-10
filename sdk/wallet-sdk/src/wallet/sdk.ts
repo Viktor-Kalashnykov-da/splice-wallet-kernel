@@ -33,8 +33,14 @@ import { AcsReader } from '@canton-network/core-acs-reader'
 import { UserService } from './namespace/user/index.js'
 import { Ops } from '@canton-network/core-provider-ledger'
 import { Events } from './namespace/events/client.js'
+import { Contracts } from './namespace/contract/index.js'
 export * from './namespace/asset/index.js'
 export type * from './namespace/token/index.js'
+export { Contracts } from './namespace/contract/index.js'
+export type {
+    AssignContractOptions,
+    UnassignContractOptions,
+} from './namespace/contract/index.js'
 
 export { type TokenProviderConfig } from '@canton-network/core-wallet-auth'
 
@@ -113,6 +119,7 @@ export type SDKInterface = {
     readonly party: Party
     readonly user: UserService
     readonly utils: SdkUtils
+    readonly contracts: Contracts
 
     amulet(config: AmuletConfig): Promise<Amulet>
     token(config: TokenConfig): Promise<Token>
@@ -192,6 +199,7 @@ export async function createFromProvider(
         party: new Party(commonCtx),
         user: new UserService(commonCtx),
         utils: new SdkUtils(commonCtx),
+        contracts: new Contracts(commonCtx),
         async amulet(config: AmuletConfig): Promise<Amulet> {
             const validatorUrl = toURL(config.validatorUrl)
 
