@@ -20,6 +20,35 @@ type PartyInfo = Omit<GenerateTransactionResponse, 'topologyTransactions'> & {
     keyPair: KeyPair
 }
 
+// ══════════════════════════════════════════════════════════
+// Multi-Synchronizer DvP Workflow
+// ══════════════════════════════════════════════════════════
+//
+// This example implements the DvP (Delivery vs Payment) flow
+// from slide 15: "Example: token using private synchronizer"
+//
+// Participants:
+//   Canton Coin app  (green  = Global Synchronizer) — Amulet instrument
+//   Token app        (blue   = Private Synchronizer) — Token instrument
+//   Alice wallet UI  — holds Amulet, receives Token
+//   Bob wallet UI    — holds Token,  receives Amulet
+//   Trading app      — orchestrates the OTC trade
+//
+// Flow:
+//   init:  create AmuletRules (global), create Amulet for Alice
+//   init:  create TokenRules  (private), create Token for Bob
+//   (1)  Trading app: create Trade → AllocationRequests displayed
+//   (2)  Alice: exercise AllocationFactory_Allocate → AmuletAllocation (global)
+//   (3)  Bob:   exercise AllocationFactory_Allocate → TokenAllocation  (private)
+//   (4)  Trading app: exercise Trade_Settle
+//          • reassign TokenAllocation (private → global)
+//          • exercise Allocation_Transfer for both legs
+//          → Amulet created for Bob (global)
+//          → Token created for Alice (global, then reassigned to private)
+//   later: exercise TransferFactory_Transfer → reassign to private sync
+//
+// ══════════════════════════════════════════════════════════
+
 // ──────────────────────────────────────────────────────────
 // 1. SDK Initialization
 // ──────────────────────────────────────────────────────────
@@ -90,16 +119,42 @@ await sdk.ledger.dar.upload(darBytes, TRADING_APP_PACKAGE_ID)
 logger.info('Trading DAR uploaded')
 
 // ──────────────────────────────────────────────────────────
-// 4. Allocate Parties (Alice, Bob, Venue)
+// 3b. Upload Token App DAR (private synchronizer instrument)
+//
+// STUB: The Token app DAR (containing TokenRules, Token
+// holding templates, TokenAllocation, etc.) does not yet
+// exist in the codebase. When available:
+//
+//   const TOKEN_APP_DAR_PATH = '/dars/token-app-1.0.0.dar'
+//   const TOKEN_APP_PACKAGE_ID = '<package-id-of-token-app>'
+//   const tokenDarPath = path.join(here, PATH_TO_LOCALNET, TOKEN_APP_DAR_PATH)
+//   const tokenDarBytes = await fs.readFile(tokenDarPath)
+//   await sdk.ledger.dar.upload(tokenDarBytes, TOKEN_APP_PACKAGE_ID)
+//   logger.info('Token App DAR uploaded')
+//
+// The Token App DAML would need at minimum:
+//   - template TokenRules (signatory: tokenAdmin)
+//       choice TokenRules_Mint : ContractId Token
+//   - template Token (implements Holding interface)
+//       with owner, instrumentId, amount, ...
+//   - template TokenAllocation (implements Allocation interface)
+//       choice Allocation_ExecuteTransfer
+// ──────────────────────────────────────────────────────────
+
+logger.info(
+    'Token App DAR upload: STUB — Token app DAR not yet available. ' +
+        'Using Amulet instrument as stand-in for Token leg.'
+)
+
+// ──────────────────────────────────────────────────────────
+// 4. Allocate Parties (Alice, Bob, Trading App)
 //    - Alice holds Amulet on the global synchronizer
-//    - Bob holds Amulet on the global synchronizer
-//      (in a full multi-sync scenario Bob would also hold
-//       a Token instrument on the private synchronizer)
-//    - Venue orchestrates the trade
+//    - Bob holds Token on the private synchronizer
+//    - Trading App orchestrates the trade
 // ──────────────────────────────────────────────────────────
 
 const allocatedParties = await Promise.all(
-    ['v1-13-alice', 'v1-13-bob', 'v1-13-venue'].map(async (partyHint) => {
+    ['v1-13-alice', 'v1-13-bob', 'v1-13-trading-app'].map(async (partyHint) => {
         const partyKeys = sdk.keys.generate()
         const party = await sdk.party.external
             .create(partyKeys.publicKey, {
@@ -126,10 +181,10 @@ const partyInfo: Map<string, PartyInfo> = new Map(allocatedParties)
 
 const alice = partyInfo.get('v1-13-alice')!
 const bob = partyInfo.get('v1-13-bob')!
-const venue = partyInfo.get('v1-13-venue')!
+const tradingApp = partyInfo.get('v1-13-trading-app')!
 
 logger.info(
-    `Parties allocated — alice: ${alice.partyId}, bob: ${bob.partyId}, venue: ${venue.partyId}`
+    `Parties allocated — alice: ${alice.partyId}, bob: ${bob.partyId}, tradingApp: ${tradingApp.partyId}`
 )
 
 // ──────────────────────────────────────────────────────────
@@ -147,26 +202,7 @@ logger.info(
     `Amulet Rules initialized (global synchronizer) — admin: ${amuletAsset.admin}`
 )
 
-// ──────────────────────────────────────────────────────────
-// 6. Initialize Token Rules (on private synchronizer)
-//    NOTE: In the current codebase only the Amulet instrument
-//    exists. A second instrument ("Token") backed by its own
-//    Token Rules on the private synchronizer is not yet
-//    implemented. When available, this would be:
-//      const tokenAsset = await asset.find('Token', privateSyncRegistryUrl)
-//    For now we use the Amulet instrument for both legs.
-// ──────────────────────────────────────────────────────────
-
-logger.info(
-    'Token Rules initialization: SKIPPED — only Amulet instrument available. ' +
-        'Using Amulet for both trade legs.'
-)
-
-// ──────────────────────────────────────────────────────────
-// 7. Mint Holdings (Amulet contracts) for Alice and Bob
-// ──────────────────────────────────────────────────────────
-
-// Mint for Alice
+// Mint Amulet for Alice on global synchronizer
 const [amuletTapCmdAlice, amuletTapDisclosedAlice] = await amulet.tap(
     alice.partyId,
     '2000000'
@@ -188,7 +224,71 @@ await sdk.ledger
 
 logger.info('Alice: Amulet holding minted on global synchronizer')
 
-// Mint for Bob
+// ──────────────────────────────────────────────────────────
+// 6. Initialize Token Rules + mint Token for Bob
+//    (Token app — private synchronizer)
+//
+// STUB: The Token app (TokenRules + Token minting) on the
+// private synchronizer is not yet implemented. When the
+// Token app DAML and its registry are available, this step
+// would look like:
+//
+//   // Discover Token asset from private sync registry
+//   const TOKEN_REGISTRY_URL = '<private-sync-registry-url>'
+//   const tokenAsset = await asset.find('Token', new URL(TOKEN_REGISTRY_URL))
+//
+//   // Create TokenRules on private synchronizer
+//   // (done by token admin during init, analogous to AmuletRules)
+//   const createTokenRulesCmd = {
+//       CreateCommand: {
+//           templateId: '#token-app:TokenApp:TokenRules',
+//           createArguments: {
+//               admin: tokenAsset.admin,
+//               // ... token rules configuration
+//           },
+//       },
+//   }
+//   await sdk.ledger
+//       .prepare({
+//           partyId: tokenAdmin,
+//           commands: createTokenRulesCmd,
+//           disclosedContracts: [],
+//           synchronizerId: privateSynchronizerId,
+//       })
+//       .sign(tokenAdminKeys.privateKey)
+//       .execute({ partyId: tokenAdmin })
+//
+//   // Mint Token for Bob on private synchronizer
+//   const mintTokenCmd = {
+//       ExerciseCommand: {
+//           templateId: '#token-app:TokenApp:TokenRules',
+//           contractId: tokenRulesCid,
+//           choice: 'TokenRules_Mint',
+//           choiceArgument: {
+//               receiver: bob.partyId,
+//               amount: '500',
+//           },
+//       },
+//   }
+//   await sdk.ledger
+//       .prepare({
+//           partyId: tokenAdmin,
+//           commands: [mintTokenCmd],
+//           disclosedContracts: [],
+//           synchronizerId: privateSynchronizerId,
+//       })
+//       .sign(tokenAdminKeys.privateKey)
+//       .execute({ partyId: tokenAdmin })
+//
+// For now, we mint Amulet for Bob on global sync as a stand-in.
+// ──────────────────────────────────────────────────────────
+
+logger.info(
+    'Token Rules initialization + Token mint for Bob: STUB — ' +
+        'Token app not yet available. Minting Amulet for Bob on global sync as stand-in.'
+)
+
+// Stand-in: Mint Amulet for Bob (replace with Token mint on private sync when available)
 const [amuletTapCmdBob, amuletTapDisclosedBob] = await amulet.tap(
     bob.partyId,
     '2000000'
@@ -206,15 +306,24 @@ await sdk.ledger
     .sign(bob.keyPair.privateKey)
     .execute({ partyId: bob.partyId })
 
-logger.info('Bob: Amulet holding minted on global synchronizer')
+logger.info(
+    'Bob: holding minted (stand-in Amulet on global; should be Token on private)'
+)
 
 // ──────────────────────────────────────────────────────────
-// 8. Create OTCTradeProposal (Alice proposes a trade)
-//    Leg 0: Alice sends 100 Amulet to Bob
-//    Leg 1: Bob sends 20 Amulet to Alice
-//    (In a full multi-sync scenario, one leg would use the
-//     Token instrument on the private synchronizer.)
+// 7. (1) Create OTCTradeProposal (Trading App creates Trade)
+//
+//    Leg 0 (Amulet leg): Alice sends 100 Amulet to Bob (global sync)
+//    Leg 1 (Token leg):  Bob sends 20 Token to Alice  (private sync)
+//
+//    The Trading App creates the trade. Both Alice and Bob
+//    see an AllocationRequest for their respective leg.
 // ──────────────────────────────────────────────────────────
+
+// STUB: When Token asset is available from private sync registry:
+//   const tokenAsset = await asset.find('Token', new URL(TOKEN_REGISTRY_URL))
+// For now, use amuletAsset as stand-in for the Token instrument.
+const tokenAsset = amuletAsset // STUB: replace with real Token asset
 
 const transferLegs = {
     leg0: {
@@ -228,7 +337,9 @@ const transferLegs = {
         sender: bob.partyId,
         receiver: alice.partyId,
         amount: '20',
-        instrumentId: { admin: amuletAsset.admin, id: 'Amulet' },
+        // STUB: When Token app is available, use Token instrument:
+        //   instrumentId: { admin: tokenAsset.admin, id: 'Token' },
+        instrumentId: { admin: tokenAsset.admin, id: 'Amulet' }, // stand-in
         meta: { values: {} },
     },
 }
@@ -238,7 +349,7 @@ const createProposal = {
         templateId:
             '#splice-token-test-trading-app:Splice.Testing.Apps.TradingApp:OTCTradeProposal',
         createArguments: {
-            venue: venue.partyId,
+            venue: tradingApp.partyId,
             tradeCid: null,
             transferLegs,
             approvers: [alice.partyId],
@@ -255,10 +366,11 @@ await sdk.ledger
     .sign(alice.keyPair.privateKey)
     .execute({ partyId: alice.partyId })
 
-logger.info('Alice created OTCTradeProposal')
+logger.info('(1) Trading App: OTCTradeProposal created by Alice')
 
 // ──────────────────────────────────────────────────────────
-// 9. Bob accepts OTCTradeProposal
+// 8. Bob accepts OTCTradeProposal
+//    (Both parties must approve before settlement can begin)
 // ──────────────────────────────────────────────────────────
 
 const activeTradeProposals = await sdk.ledger.acs.read({
@@ -296,14 +408,16 @@ await sdk.ledger
 logger.info('Bob accepted OTCTradeProposal')
 
 // ──────────────────────────────────────────────────────────
-// 10. Venue initiates settlement → creates OTCTrade
+// 9. Trading App initiates settlement → creates OTCTrade
+//    This triggers AllocationRequest contracts to appear
+//    for both Alice and Bob.
 // ──────────────────────────────────────────────────────────
 
 const activeTradeProposals2 = await sdk.ledger.acs.read({
     templateIds: [
         '#splice-token-test-trading-app:Splice.Testing.Apps.TradingApp:OTCTradeProposal',
     ],
-    parties: [venue.partyId],
+    parties: [tradingApp.partyId],
     filterByParty: true,
 })
 
@@ -314,7 +428,7 @@ const settleBefore = new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString()
 const otcpCid2 = getActiveContractCid(
     activeTradeProposals2?.[0]?.contractEntry!
 )
-if (!otcpCid2) throw new Error('OTCTradeProposal not found for venue')
+if (!otcpCid2) throw new Error('OTCTradeProposal not found for Trading App')
 
 const initiateSettlementCmd = [
     {
@@ -330,31 +444,35 @@ const initiateSettlementCmd = [
 
 await sdk.ledger
     .prepare({
-        partyId: venue.partyId,
+        partyId: tradingApp.partyId,
         commands: initiateSettlementCmd,
         disclosedContracts: [],
     })
-    .sign(venue.keyPair.privateKey)
-    .execute({ partyId: venue.partyId })
+    .sign(tradingApp.keyPair.privateKey)
+    .execute({ partyId: tradingApp.partyId })
 
-logger.info('Venue initiated settlement → OTCTrade created')
+logger.info('Trading App initiated settlement → OTCTrade created')
 
 const otcTrades = await sdk.ledger.acs.read({
     templateIds: [
         '#splice-token-test-trading-app:Splice.Testing.Apps.TradingApp:OTCTrade',
     ],
-    parties: [venue.partyId],
+    parties: [tradingApp.partyId],
     filterByParty: true,
 })
 
 const otcTradeCid = getActiveContractCid(otcTrades?.[0]?.contractEntry!)
-if (!otcTradeCid) throw new Error('OTCTrade not found for venue')
+if (!otcTradeCid) throw new Error('OTCTrade not found for Trading App')
 
 logger.info(`OTCTrade created — cid: ${otcTradeCid}`)
 
 // ──────────────────────────────────────────────────────────
-// 11. Exercise AllocationFactory_Allocate for Alice's leg
-//     This creates an Allocation (AmuletAllocation) contract
+// 10. (2) Alice: exercise AllocationFactory_Allocate
+//     Creates an AmuletAllocation on the GLOBAL synchronizer
+//
+//     Alice's AllocationRequest asks her to lock 100 Amulet.
+//     The resulting AmuletAllocation lives on the global sync
+//     (same sync as Alice's Amulet holding).
 // ──────────────────────────────────────────────────────────
 
 const pendingAllocationRequestsAlice = await token.allocation.request.pending(
@@ -394,14 +512,38 @@ await sdk.ledger
     .execute({ partyId: alice.partyId })
 
 logger.info(
-    'Alice: AllocationFactory_Allocate exercised → AmuletAllocation created'
+    '(2) Alice: AllocationFactory_Allocate exercised → AmuletAllocation created (global sync)'
 )
 
 // ──────────────────────────────────────────────────────────
-// 12. Exercise AllocationFactory_Allocate for Bob's leg
-//     This creates an Allocation (AmuletAllocation) contract
-//     (In a full multi-sync scenario, this would be a
-//      TokenAllocation on the private synchronizer.)
+// 11. (3) Bob: exercise AllocationFactory_Allocate
+//     Creates a TokenAllocation on the PRIVATE synchronizer
+//
+//     Bob's AllocationRequest asks him to lock 20 Token.
+//     The resulting TokenAllocation lives on the private sync
+//     (same sync as Bob's Token holding).
+//
+// STUB: When Token app is available on the private sync,
+// Bob would allocate against the Token asset on the private
+// synchronizer. The allocation instruction would target the
+// private sync's registry and produce a TokenAllocation:
+//
+//   const [allocateCmdBob, allocateDisclosedBob] =
+//       await token.allocation.instruction.create({
+//           allocationSpecification: specBob,
+//           asset: tokenAsset,  // Token asset from private sync registry
+//       })
+//   await sdk.ledger
+//       .prepare({
+//           partyId: bob.partyId,
+//           commands: allocateCmdBob,
+//           disclosedContracts: allocateDisclosedBob,
+//           synchronizerId: privateSynchronizerId,  // target private sync
+//       })
+//       .sign(bob.keyPair.privateKey)
+//       .execute({ partyId: bob.partyId })
+//
+// For now, Bob allocates Amulet on global sync as stand-in.
 // ──────────────────────────────────────────────────────────
 
 const pendingAllocationRequestsBob = await token.allocation.request.pending(
@@ -427,7 +569,7 @@ const specBob = {
 const [allocateCmdBob, allocateDisclosedBob] =
     await token.allocation.instruction.create({
         allocationSpecification: specBob,
-        asset: amuletAsset,
+        asset: amuletAsset, // STUB: replace with tokenAsset when Token app is available
     })
 
 await sdk.ledger
@@ -435,24 +577,30 @@ await sdk.ledger
         partyId: bob.partyId,
         commands: allocateCmdBob,
         disclosedContracts: allocateDisclosedBob,
+        // STUB: When Token app is on private sync, target private sync:
+        //   synchronizerId: privateSynchronizerId,
     })
     .sign(bob.keyPair.privateKey)
     .execute({ partyId: bob.partyId })
 
-logger.info('Bob: AllocationFactory_Allocate exercised → Allocation created')
+logger.info(
+    '(3) Bob: AllocationFactory_Allocate exercised → TokenAllocation created ' +
+        '(should be on private sync; currently stand-in AmuletAllocation on global sync)'
+)
 
 // ──────────────────────────────────────────────────────────
-// 13. Multi-Sync Reassignment: Unassign Bob's allocation
-//     from private synchronizer → global synchronizer
-//     (so that it can participate in cross-sync settlement)
+// 12. Pre-settlement: Reassign Bob's TokenAllocation
+//     from PRIVATE synchronizer → GLOBAL synchronizer
 //
-//     In a full multi-sync scenario where Bob's allocation
-//     lives on the private synchronizer, we unassign it and
-//     then assign it to the global synchronizer.
+//     The Trade_Settle choice needs all allocations on the
+//     same (global) synchronizer. Bob's TokenAllocation was
+//     created on the private sync, so it must be reassigned
+//     to the global sync before settlement can proceed.
+//
+//     Flow: unassign (private) → assign (global)
 // ──────────────────────────────────────────────────────────
 
 if (privateSynchronizerId) {
-    // Read Bob's allocation contract from the ACS
     const bobAllocations = await token.allocation.pending(bob.partyId)
     const bobAllocationCid = bobAllocations.find(
         (a) => a.interfaceViewValue.allocation.transferLegId === legIdBob
@@ -460,9 +608,11 @@ if (privateSynchronizerId) {
 
     if (bobAllocationCid) {
         logger.info(
-            `Unassigning Bob's allocation from private → global synchronizer — contractId: ${bobAllocationCid}, source: ${privateSynchronizerId}, target: ${globalSynchronizerId}`
+            `Reassigning Bob's TokenAllocation: private → global synchronizer` +
+                ` — contractId: ${bobAllocationCid}, source: ${privateSynchronizerId}, target: ${globalSynchronizerId}`
         )
 
+        // Step 1: Unassign from private synchronizer
         const unassignResult = await sdk.contracts.unassignContract({
             contractId: bobAllocationCid,
             source: privateSynchronizerId,
@@ -470,8 +620,7 @@ if (privateSynchronizerId) {
             submitter: bob.partyId,
         })
 
-        // Extract reassignmentId from the unassign response to complete the assign
-        // Response shape: { reassignment: { events: [{ JsUnassignedEvent: { value: { reassignmentId } } }] } }
+        // Extract reassignmentId to complete the assign
         const unassignEvent = unassignResult?.reassignment?.events?.[0]
         const reassignmentId =
             unassignEvent && 'JsUnassignedEvent' in unassignEvent
@@ -479,8 +628,9 @@ if (privateSynchronizerId) {
                 : undefined
 
         if (reassignmentId) {
+            // Step 2: Assign to global synchronizer
             logger.info(
-                `Assigning Bob's allocation to global synchronizer — reassignmentId: ${reassignmentId}`
+                `Assigning Bob's TokenAllocation to global synchronizer — reassignmentId: ${reassignmentId}`
             )
 
             await sdk.contracts.assignContract({
@@ -490,32 +640,43 @@ if (privateSynchronizerId) {
                 submitter: bob.partyId,
             })
 
-            logger.info("Bob's allocation reassigned to global synchronizer")
+            logger.info(
+                "Bob's TokenAllocation reassigned from private → global synchronizer"
+            )
         } else {
             logger.warn(
                 'Could not extract reassignmentId from unassign response'
             )
         }
+    } else {
+        logger.warn('Bob allocation CID not found for reassignment')
     }
 } else {
     logger.info(
-        'Cross-synchronizer reassignment of allocation: SKIPPED (single synchronizer)'
+        'Pre-settlement reassignment of TokenAllocation: SKIPPED (single synchronizer)'
     )
 }
 
 // ──────────────────────────────────────────────────────────
-// 14. Venue settles the OTCTrade
-//     Exercises Allocation_ExecuteTransfer for both legs:
-//     - New Amulet created for Bob (receiver of leg 0)
-//     - New Amulet created for Alice (receiver of leg 1)
+// 13. (4) Trading App: exercise Trade_Settle
+//
+//     The Trading App observes that both allocations are now
+//     on the global synchronizer and settles the trade:
+//       • exercise Allocation_Transfer for leg0 (Amulet: Alice→Bob)
+//       • exercise Allocation_Transfer for leg1 (Token: Bob→Alice)
+//
+//     Result:
+//       → new Amulet holding created for Bob (global sync)
+//       → new Token holding created for Alice (global sync)
 // ──────────────────────────────────────────────────────────
 
-const allocationsVenue = await token.allocation.pending(venue.partyId)
+const allocationsTradingApp = await token.allocation.pending(tradingApp.partyId)
 
 const settlementRefId = allocationRequestViewAlice.settlement.settlementRef.id
-const relevantAllocations = allocationsVenue.filter(
+const relevantAllocations = allocationsTradingApp.filter(
     (a) =>
-        a.interfaceViewValue.allocation.settlement.executor === venue.partyId &&
+        a.interfaceViewValue.allocation.settlement.executor ===
+            tradingApp.partyId &&
         a.interfaceViewValue.allocation.settlement.settlementRef.id ===
             settlementRefId
 )
@@ -577,69 +738,97 @@ const settleCmd = [
 
 await sdk.ledger
     .prepare({
-        partyId: venue.partyId,
+        partyId: tradingApp.partyId,
         commands: settleCmd,
         disclosedContracts: uniqueDisclosedContracts,
     })
-    .sign(venue.keyPair.privateKey)
-    .execute({ partyId: venue.partyId })
+    .sign(tradingApp.keyPair.privateKey)
+    .execute({ partyId: tradingApp.partyId })
 
 logger.info(
-    'Venue settled OTCTrade → Allocation_ExecuteTransfer exercised for both legs'
+    '(4) Trading App settled OTCTrade:\n' +
+        '    • Allocation_Transfer exercised for Amulet leg → Amulet created for Bob (global sync)\n' +
+        '    • Allocation_Transfer exercised for Token leg  → Token created for Alice (global sync)'
 )
 
 // ──────────────────────────────────────────────────────────
-// 15. Multi-Sync Reassignment: Move resulting holding
-//     to the private synchronizer
+// 14. Post-settlement: Reassign Alice's new Token holding
+//     from GLOBAL synchronizer → PRIVATE synchronizer
 //
-//     After settlement, the new holding for Alice (the Token
-//     leg receiver) needs to be reassigned from the global
-//     synchronizer back to the private synchronizer.
+//     After settlement, Alice received a Token holding on the
+//     global synchronizer (because settlement happened there).
+//     The Token instrument belongs on the private sync, so
+//     we reassign it back.
+//
+//     Flow: unassign (global) → assign (private)
+//
+// NOTE from presentation: "reassignment to private synchronizer
+// does not yet work for external parties!"
+// This step may fail at runtime until the platform supports it.
 // ──────────────────────────────────────────────────────────
 
 if (privateSynchronizerId) {
-    // Read Alice's new holdings after settlement
+    // Read Alice's holdings after settlement to find the newly received Token
     const aliceHoldings = await token.utxos.list({ partyId: alice.partyId })
 
     if (aliceHoldings.length > 0) {
-        // Find the newly received holding (from Bob's leg)
+        // The newly received holding is the Token leg result.
+        // In a real scenario we'd filter by instrumentId to find the Token.
+        // STUB: When Token asset is available, filter like:
+        //   const tokenHolding = aliceHoldings.find(h =>
+        //       h.interfaceViewValue?.instrumentId?.id === 'Token'
+        //   )
+        // For now, take the last holding as the stand-in.
         const holdingToReassign = aliceHoldings[aliceHoldings.length - 1]
         const holdingContractId = holdingToReassign.contractId
 
         logger.info(
-            `Unassigning Alice's new holding from global → private synchronizer — contractId: ${holdingContractId}, source: ${globalSynchronizerId}, target: ${privateSynchronizerId}`
+            `Reassigning Alice's new Token holding: global → private synchronizer` +
+                ` — contractId: ${holdingContractId}, source: ${globalSynchronizerId}, target: ${privateSynchronizerId}`
         )
 
-        const unassignResult = await sdk.contracts.unassignContract({
-            contractId: holdingContractId,
-            source: globalSynchronizerId,
-            target: privateSynchronizerId,
-            submitter: alice.partyId,
-        })
-
-        // Response shape: { reassignment: { events: [{ JsUnassignedEvent: { value: { reassignmentId } } }] } }
-        const unassignEvent = unassignResult?.reassignment?.events?.[0]
-        const reassignmentId =
-            unassignEvent && 'JsUnassignedEvent' in unassignEvent
-                ? unassignEvent.JsUnassignedEvent.value.reassignmentId
-                : undefined
-
-        if (reassignmentId) {
-            logger.info(
-                `Assigning Alice's holding to private synchronizer — reassignmentId: ${reassignmentId}`
-            )
-
-            await sdk.contracts.assignContract({
-                reassignmentId,
+        try {
+            // Step 1: Unassign from global synchronizer
+            const unassignResult = await sdk.contracts.unassignContract({
+                contractId: holdingContractId,
                 source: globalSynchronizerId,
                 target: privateSynchronizerId,
                 submitter: alice.partyId,
             })
 
-            logger.info("Alice's holding reassigned to private synchronizer")
-        } else {
+            const unassignEvent = unassignResult?.reassignment?.events?.[0]
+            const reassignmentId =
+                unassignEvent && 'JsUnassignedEvent' in unassignEvent
+                    ? unassignEvent.JsUnassignedEvent.value.reassignmentId
+                    : undefined
+
+            if (reassignmentId) {
+                // Step 2: Assign to private synchronizer
+                logger.info(
+                    `Assigning Alice's Token holding to private synchronizer — reassignmentId: ${reassignmentId}`
+                )
+
+                await sdk.contracts.assignContract({
+                    reassignmentId,
+                    source: globalSynchronizerId,
+                    target: privateSynchronizerId,
+                    submitter: alice.partyId,
+                })
+
+                logger.info(
+                    "Alice's Token holding reassigned from global → private synchronizer"
+                )
+            } else {
+                logger.warn(
+                    'Could not extract reassignmentId from unassign response'
+                )
+            }
+        } catch (err) {
+            // NOTE: This may fail for external parties (see presentation note)
             logger.warn(
-                'Could not extract reassignmentId from unassign response'
+                { err },
+                'Post-settlement reassignment failed — this is expected if ' +
+                    'reassignment to private synchronizer is not yet supported for external parties'
             )
         }
     }
@@ -650,7 +839,53 @@ if (privateSynchronizerId) {
 }
 
 // ──────────────────────────────────────────────────────────
+// 15. Later: exercise TransferFactory_Transfer
+//     (reassignment of Token to private synchronizer)
+//
+// STUB: The presentation shows a later step where
+// TransferFactory_Transfer is exercised to complete the
+// reassignment of the Token holding to the private sync.
+// This is the protocol-level completion that wraps the
+// reassignment in a transfer instruction.
+//
+// When available:
+//
+//   const transferCmd = {
+//       ExerciseCommand: {
+//           templateId: '#token-app:TokenApp:TransferFactory',
+//           contractId: transferFactoryCid,
+//           choice: 'TransferFactory_Transfer',
+//           choiceArgument: {
+//               holdingCid: aliceTokenHoldingCid,
+//               targetSynchronizer: privateSynchronizerId,
+//           },
+//       },
+//   }
+//   await sdk.ledger
+//       .prepare({
+//           partyId: alice.partyId,
+//           commands: [transferCmd],
+//           disclosedContracts: [],
+//       })
+//       .sign(alice.keyPair.privateKey)
+//       .execute({ partyId: alice.partyId })
+//
+// NOTE: Presentation states "does not yet work for external parties!"
+// ──────────────────────────────────────────────────────────
+
+logger.info(
+    'TransferFactory_Transfer step: STUB — not yet implemented. ' +
+        'This would complete reassignment of Token to private sync.'
+)
+
+// ──────────────────────────────────────────────────────────
 // 16. Verify Final Holdings
+//
+// Expected final state:
+//   Alice: original Amulet minus 100 (global sync)
+//          + 20 Token from Bob (private sync)
+//   Bob:   original Token minus 20 (private sync)
+//          + 100 Amulet from Alice (global sync)
 // ──────────────────────────────────────────────────────────
 
 const aliceUtxos = await token.utxos.list({ partyId: alice.partyId })
@@ -674,4 +909,7 @@ await token.holdings({ partyId: bob.partyId }).then((holdings) => {
     logger.info(`Bob holdings (full): ${JSON.stringify(holdings)}`)
 })
 
-logger.info('Multi-synchronizer OTC trade example completed successfully')
+logger.info(
+    'Multi-synchronizer DvP trade example completed successfully\n' +
+        'Summary: Amulet (global sync) ↔ Token (private sync) trade with cross-sync reassignment'
+)
