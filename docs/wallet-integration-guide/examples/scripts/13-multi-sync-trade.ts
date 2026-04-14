@@ -81,6 +81,7 @@ const allSynchronizers = connectedSyncResponse.connectedSynchronizers.map(
 
 logger.info(`Connected synchronizers: ${allSynchronizers.join(', ')}`)
 
+/*
 // In a multi-sync setup: first synchronizer is the global (Amulet/decentralized) synchronizer,
 // second is the private synchronizer for Token instruments.
 const globalSynchronizerId = allSynchronizers[0]
@@ -913,3 +914,4 @@ logger.info(
     'Multi-synchronizer DvP trade example completed successfully\n' +
         'Summary: Amulet (global sync) ↔ Token (private sync) trade with cross-sync reassignment'
 )
+*/

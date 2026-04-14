@@ -83,6 +83,8 @@ function ensureComposeOverride() {
     )
 }
 
+const profileArgs = profiles.flatMap((p) => ['--profile', p])
+
 const composeBase = [
     'docker',
     'compose',
